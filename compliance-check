@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Copyright Pondurance, LLC 2020
+# All rights reserved.
+
+# This scripts purpose is to gather details about compliance posture.
+# READ ONLY - THIS SCRIPT DOES NOT MODIFY ANY SETTINGS during evidence collection.
+# THIS SCRIPT DOES HAVE DEPENDENCIES
+
+# enable/disable debugging
+debug=0
+
+# use an associative array to build information about the host
+declare -A compliance_details
+
+get_distro() {
+
+  # source the OS details
+  source /etc/os-release
+
+  compliance_details[distro_id]+=$ID
+  compliance_details[distro_ver]+=$VERSION_ID
+}
+
+
+# this function will check for the dependencies and offer to install them
+get_deps() {
+
+  # list of script dependencies that *MUST* be install for the script to run
+  command_deps="jq"
+
+  # store any commands that do not exist
+  command_deps_ne=""
+
+  for dep in $command_deps
+  do
+    $(which $dep 2>&1 >/dev/null)
+    is_dep=$?
+
+    if [[ $is_dep -ne 0 ]]; then
+      command_deps_ne+=" $dep"
+    fi
+  done
+
+  if [[ -n $command_deps_ne ]]; then
+    echo ""
+    read -r -p "Missing required dependencies: $command_deps_ne, do you want to install them now? [Y/n] " response
+    case $response in
+    [yY])
+      if [[ ${compliance_details[distro_id]} == "centos" ]]; then
+        yum install $command_deps_ne -y
+      elif [[ ${compliance_details[distro_id]} == "ubuntu" ]]; then
+        apt update && apt install jq -y
+      fi ;;
+     [nN]) echo "Dependencies not installed, exiting ..." ; exit 1 ;;
+     *) echo "Option not supported, exiting..."
+        exit 1 ;;
+    esac
+  fi
+}
+
+# this function will gather details about the base OS and services
+get_compliance_details() {
+
+  # distro-agnostic details
+  compliance_details[subsystem]+=$(ps --no-headers -o comm 1)
+  compliance_details[kernel_version]+=$(uname -r)
+  compliance_details[hostname]+=$(hostname)
+  compliance_details[running_processes]+=$(ps -aux)
+  compliance_details[listening_ports]+=$(ss -lntu | grep LISTEN)
+  compliance_details[admin_users]+=$(cat /etc/group |grep wheel | awk -F ":" '{print $4}' | sed 's/,/ /g')
+  compliance_details[elevated_users]+=$(cat /etc/passwd |cut -d ':' -f1,3,4 | grep 0:0 | grep -v root | cut -d ':' -f1)
+
+  # distro-specific discovery
+  if [[ ${compliance_details[distro_id]} == "centos" ]]; then
+    compliance_details[installed_packages]+=$(rpm -qa)
+    compliance_details[distro_full]+=$(cat /etc/redhat-release)
+  elif [[ ${compliance_details[distro_id]} == "ubuntu" ]]; then
+    compliance_details[installed_packages]+=$(dpkg -l)
+    compliance_details[distro_full]+=$(lsb_release -a)
+  fi
+
+  # TODO: support non-systemd subsystems
+  if [[ ${compliance_details[subsystem]} == "systemd" ]]; then
+    compliance_details[enabled_services]+="$(systemctl list-unit-files | grep enabled)"
+    compliance_details[active_services]+="$(systemctl list-units --type service | grep .service)"
+  fi
+
+  # determine what time daemon is being used and collect the configured time servers
+  if [[ -f /etc/chrony.conf ]]; then
+    compliance_details[time_daemon]+="chrony"
+    compliance_details[time_sources]+=$(cat /etc/chrony.conf | grep ^server)
+  elif [[ -f /etc/ntp.conf ]]; then
+    compliance_details[time_daemon]+="ntpd"
+    compliance_details[time_sources]+=$(cat /etc/ntp.conf | grep ^server)
+  fi
+
+  # TODO:
+  #   * get oldest systemlog timestamp
+  #   * get password settings
+  #   * check for remote syslog configuration
+}
+
+print_debug_info() {
+
+  for detail in ${!compliance_details[@]};
+  do
+      # squelch package list debug output
+      if [[ $detail != "installed_packages" ]]; then
+        echo "$detail=${compliance_details[$detail]}"
+      fi
+  done
+}
+
+generate_json() {
+
+  jq -n \
+        --arg report_date "$(date)" \
+        --arg hostname "${compliance_details[hostname]}" \
+        --arg os_distro "${compliance_details[distro_full]}" \
+        --arg admin_users "${compliance_details[admin_users]}" \
+        --arg elevated_users "${compliance_details[elevated_users]}" \
+        --arg kernel_version "${compliance_details[kernel_version]}" \
+        --arg init_subsystem "${compliance_details[subsystem]}" \
+        --arg installed_packages "${compliance_details[installed_packages]}" \
+        --arg running_processes "${compliance_details[running_processes]}" \
+        --arg listening_ports "${compliance_details[listening_ports]}" \
+        --arg time_daemon "${compliance_details[time_daemon]}" \
+        --arg time_sources "${compliance_details[time_sources]}" \
+        '{ report_date: $report_date,
+           hostname: $hostname,
+           os_distro: $os_distro,
+           admin_users: $admin_users,
+           elevated_users: $elevated_users,
+           kernel_version: $kernel_version,
+           init_subsystem: $init_subsystem,
+           installed_packages: $installed_packages,
+           running_processes: $running_processes,
+           time_daemon: $time_daemon,
+           time_sources: $time_sources
+         }'
+}
+
+main() {
+  get_distro
+  get_deps
+  get_compliance_details
+  generate_json
+
+  if [[ $debug == 1 ]]; then
+    print_debug_info
+  fi
+}
+
+main
