@@ -25,9 +25,8 @@ Installation from release (self-distribute)
 Running with a `insecure 1-liner`
 ================================
 
-<aside class="warning">
-This is the easiest method of running the script but please be aware of the caveats of running 1-liner scripts from the internet
-</aside>
+:warning:
+:exclamation: This is the easiest method of running the script but please be aware of the caveats of running 1-liner scripts from the internet.
 
 1. Running with a 1-liner
 `curl -sL https://raw.githubusercontent.com/pondurance/compliance-check/master/compliance-check | bash > /tmp/compliance-check.json`
