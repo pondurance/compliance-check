@@ -26,6 +26,7 @@ Running with a `insecure 1-liner`
 ================================
 
 :warning:
+
 :exclamation: This is the easiest method of running the script but please be aware of the caveats of running 1-liner scripts from the internet.
 
 1. Running with a 1-liner
