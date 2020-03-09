@@ -15,10 +15,10 @@ Navigate to the [releases](https://github.com/pondurance/compliance-check/releas
 
 Unpack the archive you downloaded on the host(s) you want to run the check on. 
 
-Execute the script
+* Execute the script
 chmod +x compliance-check
 
-Run the script
+* Run the script
 ./compliance-check > /tmp/compliance-check.json
 
 * Running with a 1-liner
