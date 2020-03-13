@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright Pondurance, LLC 2020
-# All rights reserved.
 
 # This scripts purpose is to gather details about compliance posture.
 # READ ONLY - THIS SCRIPT DOES NOT MODIFY ANY SETTINGS during evidence collection.
