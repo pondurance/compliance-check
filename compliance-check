@@ -2,14 +2,22 @@
 
 # This scripts purpose is to gather details about compliance posture.
 # READ ONLY - THIS SCRIPT DOES NOT MODIFY ANY SETTINGS during evidence collection.
-# THIS SCRIPT DOES HAVE DEPENDENCIES
 
 # enable/disable debugging
 debug=0
 
+if [[ 
+  ${BASH_VERSINFO[0]} -lt 4 || 
+  ( ${BASH_VERSINFO[0]} -eq 4 && ${BASH_VERSINFO[1]} -lt 1 ) 
+]]; then 
+  echo "This script requires bash version 4.1 or later to run." >&2
+  exit 1
+fi
+
 # use an associative array to build information about the host
 declare -A compliance_details
 
+compliance_details[report_date]+=$(date)
 get_distro() {
 
   # source the OS details
@@ -19,53 +27,16 @@ get_distro() {
   compliance_details[distro_ver]+=$VERSION_ID
 }
 
-
-# this function will check for the dependencies and offer to install them
-get_deps() {
-
-  # list of script dependencies that *MUST* be install for the script to run
-  command_deps="jq"
-
-  # store any commands that do not exist
-  command_deps_ne=""
-
-  for dep in $command_deps
-  do
-    $(which $dep 2>&1 >/dev/null)
-    is_dep=$?
-
-    if [[ $is_dep -ne 0 ]]; then
-      command_deps_ne+=" $dep"
-    fi
-  done
-
-  if [[ -n $command_deps_ne ]]; then
-    echo ""
-    read -r -p "Missing required dependencies: $command_deps_ne, do you want to install them now? [Y/n] " response
-    case $response in
-    [yY])
-      if [[ ${compliance_details[distro_id]} == "centos" ]]; then
-        yum install $command_deps_ne -y
-      elif [[ ${compliance_details[distro_id]} == "ubuntu" ]]; then
-        apt update && apt install jq -y
-      fi ;;
-     [nN]) echo "Dependencies not installed, exiting ..." ; exit 1 ;;
-     *) echo "Option not supported, exiting..."
-        exit 1 ;;
-    esac
-  fi
-}
-
 # this function will gather details about the base OS and services
 get_compliance_details() {
 
   # distro-agnostic details
-  compliance_details[subsystem]+=$(ps --no-headers -o comm 1)
+  compliance_details[init_subsystem]+=$(ps --no-headers -o comm 1)
   compliance_details[kernel_version]+=$(uname -r)
   compliance_details[hostname]+=$(hostname)
   compliance_details[running_processes]+=$(ps -aux)
   compliance_details[listening_ports]+=$(ss -lntu | grep LISTEN)
-  compliance_details[admin_users]+=$(cat /etc/group |grep wheel | awk -F ":" '{print $4}' | sed 's/,/ /g')
+  compliance_details[admin_users]+=$(cat /etc/group | grep -e wheel -e sudo | awk -F ":" '{print $4}' | sed 's/,/ /g')
   compliance_details[elevated_users]+=$(cat /etc/passwd |cut -d ':' -f1,3,4 | grep 0:0 | grep -v root | cut -d ':' -f1)
 
   # distro-specific discovery
@@ -78,9 +49,22 @@ get_compliance_details() {
   fi
 
   # TODO: support non-systemd subsystems
-  if [[ ${compliance_details[subsystem]} == "systemd" ]]; then
-    compliance_details[enabled_services]+="$(systemctl list-unit-files | grep enabled)"
-    compliance_details[active_services]+="$(systemctl list-units --type service | grep .service)"
+  if [[ ${compliance_details[init_subsystem]} == "systemd" ]]; then
+    compliance_details[enabled_services]+="$(systemctl list-unit-files --state=enabled --no-legend)"
+    compliance_details[active_services]+="$(systemctl list-units --type service --no-legend)"
+
+    if [[ $(echo "${compliance_details[active_services]}" | grep "^threatstack.service" | grep -c "running") -gt 0 ]]; then
+      compliance_details[threatstack_present]+="Yes"
+    else
+      compliance_details[threatstack_present]+="No"
+    fi
+
+    if [[ $(echo "${compliance_details[active_services]}" | grep "^salt-minion.service" | grep -c "running") -gt 0 ]]; then
+      compliance_details[salt_present]+="Yes"
+    else
+      compliance_details[salt_present]+="No"
+    fi
+
   fi
 
   # determine what time daemon is being used and collect the configured time servers
@@ -90,6 +74,9 @@ get_compliance_details() {
   elif [[ -f /etc/ntp.conf ]]; then
     compliance_details[time_daemon]+="ntpd"
     compliance_details[time_sources]+=$(cat /etc/ntp.conf | grep ^server)
+  else
+    compliance_details[time_daemon]+="unknown"
+    compliance_details[time_sources]+="unknown"
   fi
 
   # TODO:
@@ -100,7 +87,7 @@ get_compliance_details() {
 
 print_debug_info() {
 
-  for detail in ${!compliance_details[@]};
+  for detail in "${!compliance_details[@]}";
   do
       # squelch package list debug output
       if [[ $detail != "installed_packages" ]]; then
@@ -109,40 +96,46 @@ print_debug_info() {
   done
 }
 
-generate_json() {
 
-  jq -n \
-        --arg report_date "$(date)" \
-        --arg hostname "${compliance_details[hostname]}" \
-        --arg os_distro "${compliance_details[distro_full]}" \
-        --arg admin_users "${compliance_details[admin_users]}" \
-        --arg elevated_users "${compliance_details[elevated_users]}" \
-        --arg kernel_version "${compliance_details[kernel_version]}" \
-        --arg init_subsystem "${compliance_details[subsystem]}" \
-        --arg installed_packages "${compliance_details[installed_packages]}" \
-        --arg running_processes "${compliance_details[running_processes]}" \
-        --arg listening_ports "${compliance_details[listening_ports]}" \
-        --arg time_daemon "${compliance_details[time_daemon]}" \
-        --arg time_sources "${compliance_details[time_sources]}" \
-        '{ report_date: $report_date,
-           hostname: $hostname,
-           os_distro: $os_distro,
-           admin_users: $admin_users,
-           elevated_users: $elevated_users,
-           kernel_version: $kernel_version,
-           init_subsystem: $init_subsystem,
-           installed_packages: $installed_packages,
-           running_processes: $running_processes,
-           time_daemon: $time_daemon,
-           time_sources: $time_sources
-         }'
+declare -a report_headers
+report_headers=(
+  report_date hostname distro_id distro_full
+  admin_users elevated_users kernel_version
+  init_subsystem enabled_services active_services
+  threatstack_present salt_present
+  installed_packages running_processes listening_ports
+  time_daemon time_sources
+)
+
+json_escape () {
+    printf '%s' "$1" | python -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+generate_json() {
+  echo '{'
+  for col in "${report_headers[@]}"; do
+    printf '"%s": %s' "${col}" "$(json_escape "${compliance_details[${col}]}")"
+    if [[ "$col" != "${report_headers[${#report_headers[@]}-1]}" ]]; then
+      echo ','
+    else
+      echo ''
+    fi
+  done
+  echo '}'
+}
+
+generate_text_report() {
+  for col in "${report_headers[@]}"; do
+    echo "%%%--- ${col}:"
+    echo "${compliance_details[${col}]}"
+  done
 }
 
 main() {
+
   get_distro
-  get_deps
   get_compliance_details
-  generate_json
+  generate_text_report
 
   if [[ $debug == 1 ]]; then
     print_debug_info
