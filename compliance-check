@@ -14,10 +14,15 @@ if [[
   exit 1
 fi
 
+if [[ $EUID -ne 0 ]]; then
+  echo "Portions of this script may not work without root. Continuing..." >&2
+fi
+
 # use an associative array to build information about the host
 declare -A compliance_details
 
 compliance_details[report_date]+=$(date)
+
 get_distro() {
 
   # source the OS details
@@ -25,6 +30,20 @@ get_distro() {
 
   compliance_details[distro_id]+=$ID
   compliance_details[distro_ver]+=$VERSION_ID
+}
+
+check_disabled_users() {
+  NL=$'\n'
+  disabled_user_check=(
+    root
+    ubuntu
+    centos
+    ec2
+  )
+
+  for u in "${disabled_user_check[@]}"; do
+    compliance_details[disabled_user_check]+="${u}: $(passwd -S "${u}" 2>&1)${NL}"
+  done
 }
 
 # this function will gather details about the base OS and services
@@ -38,6 +57,8 @@ get_compliance_details() {
   compliance_details[listening_ports]+=$(ss -lntu | grep LISTEN)
   compliance_details[admin_users]+=$(cat /etc/group | grep -e wheel -e sudo | awk -F ":" '{print $4}' | sed 's/,/ /g')
   compliance_details[elevated_users]+=$(cat /etc/passwd |cut -d ':' -f1,3,4 | grep 0:0 | grep -v root | cut -d ':' -f1)
+
+  check_disabled_users
 
   # distro-specific discovery
   if [[ ${compliance_details[distro_id]} == "centos" ]]; then
@@ -100,7 +121,8 @@ print_debug_info() {
 declare -a report_headers
 report_headers=(
   report_date hostname distro_id distro_full
-  admin_users elevated_users kernel_version
+  admin_users elevated_users disabled_user_check
+  kernel_version
   init_subsystem enabled_services active_services
   threatstack_present salt_present
   installed_packages running_processes listening_ports
